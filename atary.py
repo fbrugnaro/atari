@@ -8,7 +8,7 @@ from collections import deque
 import os.path
 from datetime import datetime
 
-from gym_wrappers import make_atari
+from gym_wrappers import wrap_deepmind
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.models import Model
 from tensorflow.keras.models import Sequential
@@ -19,7 +19,7 @@ from tensorflow.keras.layers import Conv2D, Flatten, Dense
 class DQNAgent():
     def __init__(self, game_name="Breakout", total_episodes=None, render=True, clip_reward = True):
         #env settings
-        self.env_name = game_name + "NoFrameskip-v4"  
+        self.env_name = game_name + "Deterministic-v4"  
         self.total_episodes_limit = total_episodes
         self.render = render
         self.clip_reward = clip_reward
@@ -27,14 +27,15 @@ class DQNAgent():
         self.model_save_frequency = 10000
 
         #using openai wrapper to pre-process the input
-        self.env = make_atari(self.env_name)
+        env = gym.make(self.env_name)
+        self.env = wrap_deepmind(env, True, False, True)
         self.input_shape = (84, 84, 4)
         self.action_size = self.env.action_space.n
 
         #replay memory and sample
         self.memory = deque(maxlen=200000)
         self.mem_sample = 32
-        self.observation_size = 10000
+        self.observation_size = 50000
         self.train_frequency = 4
 
         #learning rate
@@ -73,6 +74,7 @@ class DQNAgent():
         self.model.compile(loss="mse", optimizer=Adam(lr=self.alpha))
         self.model.summary()
         return self.model
+        
 
     def save_model(self):
         self.train_model.save(self.env_name)
@@ -107,7 +109,7 @@ class DQNAgent():
                 current_state = np.expand_dims(np.asarray(state).astype(np.float64), axis=0)
                 current_states.append(current_state)
                 next_state = np.expand_dims(np.asarray(next_state).astype(np.float64), axis=0)
-                next_state_prediction = self.target_model.predict(next_state).ravel()
+                next_state_prediction = self.target_model.predict(next_state)
                 
                 next_q_value = np.max(next_state_prediction)
                 
@@ -162,6 +164,7 @@ class DQNAgent():
 
                 action = self.choose_action(current_state)
                 next_state, reward, terminal, info = self.env.step(action)
+
                 if self.clip_reward:
                     np.sign(reward)
 
@@ -203,5 +206,5 @@ class DQNAgent():
 
         return total_rewards 
 
-pippo=DQNAgent()
-pippo.train()
+dqn=DQNAgent()
+dqn.train()

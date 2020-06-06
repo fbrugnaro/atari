@@ -1,5 +1,5 @@
 import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 import tensorflow as tf
 import gym
 import random
@@ -17,9 +17,10 @@ from tensorflow.keras.models import clone_model
 from tensorflow.keras.layers import Conv2D, Flatten, Dense
 
 class DQNAgent():
-    def __init__(self, game_name="Breakout", total_episodes=None, render=True, clip_reward = True):
+    def __init__(self, load_model=True, game_name="Breakout", total_episodes=None, render=False, clip_reward=True):
         #env settings
-        self.env_name = game_name + "Deterministic-v4"  
+        self.game_name = game_name
+        self.env_name = game_name + "Deterministic-v4"
         self.total_episodes_limit = total_episodes
         self.render = render
         self.clip_reward = clip_reward
@@ -33,7 +34,7 @@ class DQNAgent():
         self.action_size = self.env.action_space.n
 
         #replay memory and sample
-        self.memory = deque(maxlen=200000)
+        self.memory = deque(maxlen=400000)
         self.mem_sample = 32
         self.observation_size = 50000
         self.train_frequency = 4
@@ -43,8 +44,8 @@ class DQNAgent():
 
         #exploration
         self.epsilon = 1
-        self.epsilon_min = 0.01
-        self.epsilon_steps = 500000
+        self.epsilon_min = 0.1
+        self.epsilon_steps = 400000
         self.epsilon_reduction = (self.epsilon - self.epsilon_min)/self.epsilon_steps
 
         self.gamma = 0.99
@@ -53,21 +54,20 @@ class DQNAgent():
         self.train_model = self.create_atari_model()
         self.target_model = self.create_atari_model()
         self.target_model.set_weights(self.train_model.get_weights())
+       
+        if load_model:
+            self.reload_model()
+            self.epsilon = 0.1
+ 
 
     def create_atari_model(self):
         self.model = Sequential()
-        self.model.add(Conv2D(32, kernel_size=8, strides=4,
-                              padding="same",
-                              activation="relu",
-                              input_shape=self.input_shape))
-        self.model.add(Conv2D(64, kernel_size=4, strides=2,
-                              padding="same",
-                              activation="relu",
-                              input_shape=self.input_shape))
-        self.model.add(Conv2D(64, kernel_size=3, strides=1,
-                              padding="same",
-                              activation="relu",
-                              input_shape=self.input_shape))
+        self.model.add(Conv2D(32, 8, strides=(4, 4), padding="valid",activation="relu", 
+                              input_shape = self.input_shape))
+        self.model.add(Conv2D(64, 4, strides=(2, 2), padding="valid", activation="relu",
+                              input_shape = self.input_shape))
+        self.model.add(Conv2D(64, 3, strides=(1, 1), padding="valid",activation="relu",
+                              input_shape = self.input_shape))
         self.model.add(Flatten())
         self.model.add(Dense(512, activation="relu"))
         self.model.add(Dense(self.action_size))
@@ -77,11 +77,13 @@ class DQNAgent():
         
 
     def save_model(self):
-        self.train_model.save(self.env_name)
+        print ("Saving model epsilon: {}".format(self.epsilon))
+        self.train_model.save("Atari/{}".format(self.game_name))
 
-    def load_model(self):
-        self.target_model.load_weights(self.env_name)
-        self.train_model.load_weights(self.env_name)
+    def reload_model(self):
+        print ("Loading model")
+        self.target_model = load_model("Atari/{}".format(self.game_name))
+        self.train_model = load_model("Atari/{}".format(self.game_name))
 
     def choose_action(self, state):
         if np.random.rand() < self.epsilon or len(self.memory) < self.observation_size:
@@ -153,7 +155,6 @@ class DQNAgent():
             current_state = self.env.reset()
             step = 0
             score = 0
-            print("Episode: {}, total steps: {}".format(episode, total_steps))
 
             while True:
                 total_steps += 1
@@ -176,35 +177,41 @@ class DQNAgent():
 
                 #game over
                 if terminal:
+                    print("Episode: {}, total steps: {}, score: {}, epsilon: {}".format(episode, total_steps, score, self.epsilon))
                     break
 
-    def play(self, filename, trials=400, render=True):
-        epochs = []
-        successes = []
-        total_rewards = []
-        self.load_model(filename)
-        try:
-            for episode in range(trials):
-                current_state = self.env.reset()
+    def test(self, trials=500, render=True):
+        total_scores = []
+        game_score = 0
 
-                terminal=False
-                total_reward = 0
-                while not terminal:
-                    if render:
-                        self.env.render()
-                    action = np.argmax(self.train_model.predict(np.expand_dims(np.asarray(current_state).astype(np.float64), axis=0), batch_size=1)[0])
+        for episode in range(trials):
+            current_state = self.env.reset()
+            score = 0
 
-                    next_state, reward, terminal, info = env.step(action)
+            while True:
+                if render:
+                    self.env.render()
+                action = np.argmax(self.train_model.predict(np.expand_dims(np.asarray(current_state).astype(np.float64), axis=0), batch_size=1)[0])
 
-                    total_reward += reward
-                    state = next_state
-               
-                print("Episode #{} total reward {}".format(episode + 1, total_reward))
-                total_rewards.append(total_reward)
-        finally:
-            self.env.close()
+                next_state, reward, terminal, info = self.env.step(action)
 
-        return total_rewards 
+                score += reward
+                current_state = next_state
+
+                if terminal:
+                    print("Episode number: {}, this episode score: {}".format(episode + 1, score))
+                    game_score += score
+                    total_scores.append(score)
+                    break
+            
+            if info['ale.lives'] == 0:
+                print("Game Over, total score: {}".format(game_score))
+                game_score = 0
+        
+        
+        self.env.close()
+
+        return total_scores 
 
 dqn=DQNAgent()
-dqn.train()
+dqn.test()

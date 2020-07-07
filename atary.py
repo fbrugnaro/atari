@@ -1,51 +1,54 @@
-import os
-#os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 import tensorflow as tf
 import gym
 import random
 import numpy as np
-from collections import deque
-import os.path
-from datetime import datetime
 
-from gym_wrappers import wrap_deepmind
+from gym_wrappers import wrap_deepmind, make_atari
+from tensorflow import keras
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.models import Model
-from tensorflow.keras.models import Sequential
 from tensorflow.keras.models import load_model
-from tensorflow.keras.models import clone_model
-from tensorflow.keras.layers import Conv2D, Flatten, Dense
+from tensorflow.keras.layers import Conv2D, Flatten, Dense, Input
 
-class DQNAgent():
-    def __init__(self, load_model=True, game_name="Breakout", total_episodes=None, render=False, clip_reward=True):
+class DDQNAgent():
+    def __init__(self, load_model=True, game_name="Breakout", testing=False, total_episodes=None, render=False):
         #env settings
+        self.seed = 3
         self.game_name = game_name
-        self.env_name = game_name + "Deterministic-v4"
+        self.env_name = game_name + "NoFrameskip-v4"
+        if testing:
+            self.env_name = game_name + "-v4"
+
         self.total_episodes_limit = total_episodes
         self.render = render
-        self.clip_reward = clip_reward
-        self.target_model_update = 40000
-        self.model_save_frequency = 10000
+        self.target_model_update = 10000
+        self.save_counter = 0
 
         #using openai wrapper to pre-process the input
-        env = gym.make(self.env_name)
-        self.env = wrap_deepmind(env, True, False, True)
-        self.input_shape = (84, 84, 4)
+        if testing:
+            env = gym.make(self.env_name)
+        else:
+            env = make_atari(self.env_name)
+
+        self.env = wrap_deepmind(env, True, True, True, True)
+        self.env.seed(self.seed)
         self.action_size = self.env.action_space.n
 
         #replay memory and sample
-        self.memory = deque(maxlen=400000)
+        self.action_history = []
+        self.state_history = []
+        self.next_state_history = []
+        self.rewards_history = []
+        self.terminal_history = []
+        self.max_memory_len = 900000
         self.mem_sample = 32
         self.observation_size = 50000
         self.train_frequency = 4
 
-        #learning rate
-        self.alpha = 0.00025
-
         #exploration
         self.epsilon = 1
         self.epsilon_min = 0.1
-        self.epsilon_steps = 400000
+        self.epsilon_steps = 1000000
         self.epsilon_reduction = (self.epsilon - self.epsilon_min)/self.epsilon_steps
 
         self.gamma = 0.99
@@ -54,94 +57,101 @@ class DQNAgent():
         self.train_model = self.create_atari_model()
         self.target_model = self.create_atari_model()
         self.target_model.set_weights(self.train_model.get_weights())
-       
-        if load_model:
+        self.optimizer = keras.optimizers.Adam(learning_rate=0.00025, clipnorm=1.0)
+
+        if load_model or testing:
             self.reload_model()
             self.epsilon = 0.1
  
 
     def create_atari_model(self):
-        self.model = Sequential()
-        self.model.add(Conv2D(32, 8, strides=(4, 4), padding="valid",activation="relu", 
-                              input_shape = self.input_shape))
-        self.model.add(Conv2D(64, 4, strides=(2, 2), padding="valid", activation="relu",
-                              input_shape = self.input_shape))
-        self.model.add(Conv2D(64, 3, strides=(1, 1), padding="valid",activation="relu",
-                              input_shape = self.input_shape))
-        self.model.add(Flatten())
-        self.model.add(Dense(512, activation="relu"))
-        self.model.add(Dense(self.action_size))
-        self.model.compile(loss="mse", optimizer=Adam(lr=self.alpha))
-        self.model.summary()
-        return self.model
+        inputs = Input(shape=(84, 84, 4,))
+
+        layer1 = Conv2D(32, 8, strides=4, activation="relu")(inputs)
+        layer2 = Conv2D(64, 4, strides=2, activation="relu")(layer1)
+        layer3 = Conv2D(64, 3, strides=1, activation="relu")(layer2)
+        layer4 = Flatten()(layer3)
+        layer5 = Dense(512, activation="relu")(layer4)
+        action = Dense(self.action_size, activation="linear")(layer5)
+
+        model = Model(inputs=inputs, outputs=action)
+        model.summary()
+
+        return model
         
 
     def save_model(self):
         print ("Saving model epsilon: {}".format(self.epsilon))
-        self.train_model.save("Atari/{}".format(self.game_name))
+        self.target_model.save("Atari/{}-{}".format(self.game_name, self.save_counter))
+        self.save_counter += 1
+        if self.save_counter == 3:
+            self.save_counter = 0
 
     def reload_model(self):
         print ("Loading model")
         self.target_model = load_model("Atari/{}".format(self.game_name))
         self.train_model = load_model("Atari/{}".format(self.game_name))
 
-    def choose_action(self, state):
-        if np.random.rand() < self.epsilon or len(self.memory) < self.observation_size:
-            return random.randrange(self.action_size)
-        q_values = self.train_model.predict(np.expand_dims(np.asarray(state).astype(np.float64), axis=0), batch_size=1)
-        return np.argmax(q_values[0])
+    def choose_action(self, state, total_steps):
+        if np.random.rand() < self.epsilon or total_steps < self.observation_size:
+            return np.random.choice(self.action_size)
+            
+        state_tensor = tf.convert_to_tensor(state)
+        state_tensor = tf.expand_dims(state_tensor, 0)
+        action_probs = self.train_model(state_tensor, training=False)
+
+        return tf.argmax(action_probs[0]).numpy() 
+
+    def choose_best_action(self, state):
+        state_tensor = tf.convert_to_tensor(state)
+        state_tensor = tf.expand_dims(state_tensor, 0)
+        action_probs = self.train_model(state_tensor, training=False)
+
+        return tf.argmax(action_probs[0]).numpy()
 
     def memorize(self, current_state, action, reward, next_state, terminal):
-        self.memory.append((current_state, action, reward, next_state, terminal))
+        self.state_history.append(current_state)
+        self.action_history.append(action)
+        self.rewards_history.append(reward)
+        self.next_state_history.append(next_state)
+        self.terminal_history.append(terminal)
 
     def train_memory(self, total_step):
-        if len(self.memory) < self.observation_size:
-            return
-
-        if total_step % self.train_frequency == 0:
-            minibatch = np.asarray(random.sample(self.memory, self.mem_sample))
-            if len(minibatch) < self.mem_sample:
-                return
-
-            current_states = []
-            q_values = []
-            max_q_values = []
-
-            for state, action, reward, next_state, terminal in minibatch:
-                current_state = np.expand_dims(np.asarray(state).astype(np.float64), axis=0)
-                current_states.append(current_state)
-                next_state = np.expand_dims(np.asarray(next_state).astype(np.float64), axis=0)
-                next_state_prediction = self.target_model.predict(next_state)
-                
-                next_q_value = np.max(next_state_prediction)
-                
-                q = list(self.train_model.predict(current_state)[0])
-                if terminal:
-                    q[action] = reward
-                else:
-                    q[action] = reward + self.gamma * next_q_value
-                q_values.append(q)
-                max_q_values.append(np.max(q))
-
-            fit = self.train_model.fit(np.asarray(current_states).squeeze(),
-                                np.asarray(q_values).squeeze(),
-                                batch_size=self.mem_sample,
-                                verbose=0)
-            #loss = fit.history["loss"][0]
-            #accuracy = fit.history["acc"][0]
+        if total_step % self.train_frequency == 0 and len(self.state_history) > self.mem_sample:
+            #sample random batch
+            indices = np.random.choice(range(len(self.state_history)), size=self.mem_sample)
             
+            state_sample = np.array([self.state_history[i] for i in indices])
+            next_state_sample = np.array([self.next_state_history[i] for i in indices])
+            rewards_sample = [self.rewards_history[i] for i in indices]
+            action_sample = [self.action_history[i] for i in indices]
+            terminal_sample = tf.convert_to_tensor([float(self.terminal_history[i]) for i in indices])
             
-        #epsilon decay
-        self.epsilon -= self.epsilon_reduction
-        self.epsilon = max(self.epsilon_min, self.epsilon)
+            #predict using the target model
+            future_rewards = self.target_model.predict(next_state_sample)
+            updated_q_values = rewards_sample + self.gamma * tf.reduce_max(future_rewards, axis=1)
+            
+            #if terminal set the last value to -1
+            updated_q_values = updated_q_values * (1 - terminal_sample) - terminal_sample
+            
+            masks = tf.one_hot(action_sample, self.action_size)
 
-        if total_step % self.model_save_frequency == 0:
-            self.save_model()
+            with tf.GradientTape() as tape:
+                # Train the model on the states and updated Q-values
+                q_values = self.train_model(state_sample)
 
-        if total_step % self.target_model_update == 0:
-            self.target_model.set_weights(self.train_model.get_weights())
-            print("updating model, epsilon: {}, total steps: {}".format(self.epsilon, total_step))
+                # Apply the masks to the Q-values to get the Q-value for action taken
+                q_action = tf.reduce_sum(tf.multiply(q_values, masks), axis=1)
+                # Calculate loss between new Q-value and old Q-value
+                # Clip the deltas using huber loss for stability
+                huber = keras.losses.Huber()
+                loss = huber(updated_q_values, q_action)
 
+            #backpropagation
+            grads = tape.gradient(loss, self.train_model.trainable_variables)
+            self.optimizer.apply_gradients(zip(grads, self.train_model.trainable_variables))
+            
+        
     def train(self):
         episode = 0
         total_steps = 0
@@ -152,9 +162,9 @@ class DQNAgent():
                 exit(0)
             
             episode += 1
-            current_state = self.env.reset()
+            current_state = np.array(self.env.reset())
             step = 0
-            score = 0
+            episode_reward = 0
 
             while True:
                 total_steps += 1
@@ -163,27 +173,48 @@ class DQNAgent():
                 if self.render:
                     self.env.render()
 
-                action = self.choose_action(current_state)
+                action = self.choose_action(current_state, total_steps)
+
+                #epsilon decay
+                self.epsilon -= self.epsilon_reduction
+                self.epsilon = max(self.epsilon_min, self.epsilon)
+
                 next_state, reward, terminal, info = self.env.step(action)
+                next_state = np.array(next_state)
 
-                if self.clip_reward:
-                    np.sign(reward)
-
-                score += reward
+                episode_reward += reward
+                
+                #save in the replay buffer
                 self.memorize(current_state, action, reward, next_state, terminal)
                 current_state = next_state
 
-                self.train_memory(total_steps)
+                #train the model
+                self.train_memory(total_steps)                    
 
-                #game over
+                #update & save target model
+                if total_steps % self.target_model_update == 0:
+                    self.target_model.set_weights(self.train_model.get_weights())
+                    print("updating model, epsilon: {}, total steps: {}".format(self.epsilon, total_steps))
+                    self.save_model()
+
+                #limit memory len
+                if len(self.state_history) > self.max_memory_len:
+                    del self.rewards_history[:1]
+                    del self.state_history[:1]
+                    del self.next_state_history[:1]
+                    del self.action_history[:1]
+                    del self.terminal_history[:1]
+
+
+                #episode is over
                 if terminal:
-                    print("Episode: {}, total steps: {}, score: {}, epsilon: {}".format(episode, total_steps, score, self.epsilon))
+                    print("Episode: {}, total steps: {}, score: {}, epsilon: {}".format(episode, total_steps, episode_reward, self.epsilon))
                     break
 
     def test(self, trials=500, render=True):
         total_scores = []
         game_score = 0
-
+        
         for episode in range(trials):
             current_state = self.env.reset()
             score = 0
@@ -191,7 +222,7 @@ class DQNAgent():
             while True:
                 if render:
                     self.env.render()
-                action = np.argmax(self.train_model.predict(np.expand_dims(np.asarray(current_state).astype(np.float64), axis=0), batch_size=1)[0])
+                action = self.choose_best_action(current_state)
 
                 next_state, reward, terminal, info = self.env.step(action)
 
@@ -213,5 +244,13 @@ class DQNAgent():
 
         return total_scores 
 
-dqn=DQNAgent()
-dqn.test()
+dqn=DDQNAgent(load_model=False, total_episodes=2000000)
+dqn.train()
+
+dqn=DDQNAgent(True, testing=True)
+scores = dqn.test()
+hiscore = 0
+for s in scores:
+    if s > hiscore:
+        hiscore = s
+print("hiscore: {}".format(hiscore))
